@@ -1,14 +1,14 @@
-# AWS ECR Credentials
-Allow for AWS ECR credentials to be refreshed inside your Kubernetes cluster via ImagePullSecrets
+# Container Registry Credentials
+Allow for credentials to be automatically refreshed for AWS ECR or Google Container Registry inside your Kubernetes cluster via ImagePullSecrets
 
 ## How it works
 
 1. The tool runs as a pod in the `kube-system` namespace.
 - It gets credentials from AWS ECR via the aws-go sdk
-- Next it creates a secret named `awsecr-creds` (by default)
+- Creates a secret named `awsecr-creds` (by default for AWS) or `gcr-secret-name` for Google
 - Then it sets up this secret to be used in the `ImagePullSecrets` for the default service account
 - Whenever a pod is created, this secret is attached to the pod
-- The container will refresh the credentials by default every 11 hours 55 minutes since they expire at 12 hours
+- The container will refresh the credentials by default every 60 minutes
 - Enabled for use with Minikube as an addon (https://github.com/kubernetes/minikube#add-ons)
 
 _NOTE: This will setup credentials across ALL namespaces!_
@@ -19,7 +19,7 @@ The following parameters are driven via Environment variables.
 
 - Environment Variables:
   - AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY: Credentials to access AWS
-  - awsaccount: AWS Account Id 
+  - awsaccount: AWS Account Id
   - awsregion: (optional) Can override the default aws region by setting this variable. Note: The region can also be specified as an arg to the binary.  
 
 ## How to setup running in AWS
@@ -61,6 +61,16 @@ kubectl create -f k8s/secret.yaml
 ## DockerHub Image
 
 - https://hub.docker.com/r/upmcenterprises/awsecr-creds/
+
+## Developing Locally
+
+If you want to hack on this project:
+
+1. Clone the repo
+2. Build: `make binary`
+3. Test: `make test`
+4. Run on your machine: ` go run ./aws_credentials.go --kubecfg-file=<pathToKubecfgFile> --use-kubernetes-cluster-service=false
+`
 
 ## About
 

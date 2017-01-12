@@ -128,6 +128,7 @@ func newKubeClient() kubeInterface {
 func (c *controller) getGCRAuthorizationKey() (AuthToken, error) {
 	ts, err := c.gcrClient.DefaultTokenSource(context.TODO(), "https://www.googleapis.com/auth/cloud-platform")
 	if err != nil {
+		log.Print("getting creds was nil")
 		return AuthToken{}, err
 	}
 
@@ -202,6 +203,8 @@ type SecretGenerator struct {
 }
 
 func (c *controller) process() error {
+	log.Println("Processing Credentials...")
+
 	secretGenerators := []SecretGenerator{
 		SecretGenerator{
 			TokenGenFxn: c.getGCRAuthorizationKey,
