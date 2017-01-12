@@ -8,8 +8,6 @@ import (
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/aws-sdk-go/service/ecr"
 	"github.com/stretchr/testify/assert"
-	"golang.org/x/net/context"
-	"golang.org/x/oauth2"
 	"k8s.io/kubernetes/pkg/api"
 	"k8s.io/kubernetes/pkg/client/unversioned"
 	"k8s.io/kubernetes/pkg/watch"
@@ -152,24 +150,6 @@ func (f *fakeEcrClient) GetAuthorizationToken(input *ecr.GetAuthorizationTokenIn
 	}, nil
 }
 
-type fakeGcrClient struct{}
-
-type fakeTokenSource struct{}
-
-func (f fakeTokenSource) Token() (*oauth2.Token, error) {
-	return &oauth2.Token{
-		AccessToken: "fakeToken",
-	}, nil
-}
-
-func newFakeTokenSource() fakeTokenSource {
-	return fakeTokenSource{}
-}
-
-func (f *fakeGcrClient) DefaultTokenSource(ctx context.Context, scope ...string) (oauth2.TokenSource, error) {
-	return newFakeTokenSource(), nil
-}
-
 func newFakeKubeClient() *fakeKubeClient {
 	return &fakeKubeClient{
 		secrets: map[string]*fakeSecrets{
@@ -236,189 +216,107 @@ func newFakeEcrClient() *fakeEcrClient {
 	return &fakeEcrClient{}
 }
 
-func newFakeGcrClient() *fakeGcrClient {
-	return &fakeGcrClient{}
-}
-
 func TestgetECRAuthorizationKey(t *testing.T) {
 	kubeClient := newFakeKubeClient()
 	ecrClient := newFakeEcrClient()
-	gcrClient := newFakeGcrClient()
-	c := &controller{kubeClient, ecrClient, gcrClient}
+
+	c := &controller{kubeClient, ecrClient}
 
 	token, err := c.getECRAuthorizationKey()
 
-	assert.Equal(t, "fakeToken", token.AccessToken)
-	assert.Equal(t, "fakeEndpoint", token.Endpoint)
+	assert.Equal(t, "fakeToken", *token.AuthorizationToken)
+	assert.Equal(t, "fakeEndpoint", *token.ProxyEndpoint)
 	assert.Nil(t, err)
 }
 
 func TestProcessOnce(t *testing.T) {
 	kubeClient := newFakeKubeClient()
 	ecrClient := newFakeEcrClient()
-	*argGCRURL = "fakeEndpoint"
-	gcrClient := newFakeGcrClient()
-	c := &controller{kubeClient, ecrClient, gcrClient}
 
+	c := &controller{kubeClient, ecrClient}
 	err := c.process()
 	assert.Nil(t, err)
 
-	// Test GCR
-	secret, err := c.kubeClient.Secrets("namespace1").Get(*argGCRSecretName)
+	secret, err := c.kubeClient.Secrets("namespace1").Get(*argDefaultSecretName)
 	assert.Nil(t, err)
-	assert.Equal(t, *argGCRSecretName, secret.Name)
+	assert.Equal(t, *argDefaultSecretName, secret.Name)
 	assert.Equal(t, map[string][]byte{
-		".dockercfg": []byte(fmt.Sprintf(dockerCfgTemplate, "fakeEndpoint", "fakeToken")),
+		".dockerconfigjson": []byte(fmt.Sprintf(dockerJSONTemplate, "fakeEndpoint", "fakeToken")),
 	}, secret.Data)
-	assert.Equal(t, api.SecretType("kubernetes.io/dockercfg"), secret.Type)
+	assert.Equal(t, api.SecretType("kubernetes.io/dockerconfigjson"), secret.Type)
 
-	secret, err = c.kubeClient.Secrets("namespace1").Get(*argGCRSecretName)
+	secret, err = c.kubeClient.Secrets("namespace2").Get(*argDefaultSecretName)
 	assert.Nil(t, err)
-	assert.Equal(t, *argGCRSecretName, secret.Name)
+	assert.Equal(t, *argDefaultSecretName, secret.Name)
 	assert.Equal(t, map[string][]byte{
-		".dockercfg": []byte(fmt.Sprintf(dockerCfgTemplate, "fakeEndpoint", "fakeToken")),
+		".dockerconfigjson": []byte(fmt.Sprintf(dockerJSONTemplate, "fakeEndpoint", "fakeToken")),
 	}, secret.Data)
-	assert.Equal(t, api.SecretType("kubernetes.io/dockercfg"), secret.Type)
+	assert.Equal(t, api.SecretType("kubernetes.io/dockerconfigjson"), secret.Type)
 
-	_, err = c.kubeClient.Secrets("kube-system").Get(*argGCRSecretName)
+	_, err = c.kubeClient.Secrets("kube-system").Get(*argDefaultSecretName)
 	assert.NotNil(t, err)
 
 	serviceAccount, err := c.kubeClient.ServiceAccounts("namespace1").Get("default")
 	assert.Nil(t, err)
-	assert.Equal(t, *argGCRSecretName, serviceAccount.ImagePullSecrets[0].Name)
-
-	serviceAccount, err = c.kubeClient.ServiceAccounts("namespace1").Get("default")
-	assert.Nil(t, err)
-	assert.Equal(t, *argGCRSecretName, serviceAccount.ImagePullSecrets[0].Name)
-
-	// Test AWS
-	secret, err = c.kubeClient.Secrets("namespace2").Get(*argAWSSecretName)
-	assert.Nil(t, err)
-	assert.Equal(t, *argAWSSecretName, secret.Name)
-	assert.Equal(t, map[string][]byte{
-		".dockerconfigjson": []byte(fmt.Sprintf(dockerJSONTemplate, "fakeEndpoint", "fakeToken")),
-	}, secret.Data)
-	assert.Equal(t, api.SecretType("kubernetes.io/dockerconfigjson"), secret.Type)
-
-	secret, err = c.kubeClient.Secrets("namespace2").Get(*argAWSSecretName)
-	assert.Nil(t, err)
-	assert.Equal(t, *argAWSSecretName, secret.Name)
-	assert.Equal(t, map[string][]byte{
-		".dockerconfigjson": []byte(fmt.Sprintf(dockerJSONTemplate, "fakeEndpoint", "fakeToken")),
-	}, secret.Data)
-	assert.Equal(t, api.SecretType("kubernetes.io/dockerconfigjson"), secret.Type)
-
-	_, err = c.kubeClient.Secrets("kube-system").Get(*argAWSSecretName)
-	assert.NotNil(t, err)
+	assert.Equal(t, 1, len(serviceAccount.ImagePullSecrets))
+	assert.Equal(t, *argDefaultSecretName, serviceAccount.ImagePullSecrets[0].Name)
 
 	serviceAccount, err = c.kubeClient.ServiceAccounts("namespace2").Get("default")
 	assert.Nil(t, err)
-	assert.Equal(t, 2, len(serviceAccount.ImagePullSecrets))
-	assert.Equal(t, *argAWSSecretName, serviceAccount.ImagePullSecrets[1].Name)
-
-	serviceAccount, err = c.kubeClient.ServiceAccounts("namespace2").Get("default")
-	assert.Nil(t, err)
-	assert.Equal(t, 2, len(serviceAccount.ImagePullSecrets))
-	assert.Equal(t, *argAWSSecretName, serviceAccount.ImagePullSecrets[1].Name)
+	assert.Equal(t, 1, len(serviceAccount.ImagePullSecrets))
+	assert.Equal(t, *argDefaultSecretName, serviceAccount.ImagePullSecrets[0].Name)
 }
 
 func TestProcessTwice(t *testing.T) {
-
 	kubeClient := newFakeKubeClient()
 	ecrClient := newFakeEcrClient()
-	*argGCRURL = "fakeEndpoint"
-	gcrClient := newFakeGcrClient()
-	c := &controller{kubeClient, ecrClient, gcrClient}
+
+	c := &controller{kubeClient, ecrClient}
 	err := c.process()
 	assert.Nil(t, err)
 	// test processing twice for idempotency
 	err = c.process()
 	assert.Nil(t, err)
 
-	// Test GCR
-	secret, err := c.kubeClient.Secrets("namespace1").Get(*argGCRSecretName)
+	secret, err := c.kubeClient.Secrets("namespace1").Get(*argDefaultSecretName)
 	assert.Nil(t, err)
-	assert.Equal(t, *argGCRSecretName, secret.Name)
+	assert.Equal(t, *argDefaultSecretName, secret.Name)
 	assert.Equal(t, map[string][]byte{
-		".dockercfg": []byte(fmt.Sprintf(dockerCfgTemplate, "fakeEndpoint", "fakeToken")),
+		".dockerconfigjson": []byte(fmt.Sprintf(dockerJSONTemplate, "fakeEndpoint", "fakeToken")),
 	}, secret.Data)
-	assert.Equal(t, api.SecretType("kubernetes.io/dockercfg"), secret.Type)
+	assert.Equal(t, api.SecretType("kubernetes.io/dockerconfigjson"), secret.Type)
 
-	secret, err = c.kubeClient.Secrets("namespace1").Get(*argGCRSecretName)
+	secret, err = c.kubeClient.Secrets("namespace2").Get(*argDefaultSecretName)
 	assert.Nil(t, err)
-	assert.Equal(t, *argGCRSecretName, secret.Name)
+	assert.Equal(t, *argDefaultSecretName, secret.Name)
 	assert.Equal(t, map[string][]byte{
-		".dockercfg": []byte(fmt.Sprintf(dockerCfgTemplate, "fakeEndpoint", "fakeToken")),
+		".dockerconfigjson": []byte(fmt.Sprintf(dockerJSONTemplate, "fakeEndpoint", "fakeToken")),
 	}, secret.Data)
-	assert.Equal(t, api.SecretType("kubernetes.io/dockercfg"), secret.Type)
+	assert.Equal(t, api.SecretType("kubernetes.io/dockerconfigjson"), secret.Type)
 
-	_, err = c.kubeClient.Secrets("kube-system").Get(*argGCRSecretName)
+	_, err = c.kubeClient.Secrets("kube-system").Get(*argDefaultSecretName)
 	assert.NotNil(t, err)
 
 	serviceAccount, err := c.kubeClient.ServiceAccounts("namespace1").Get("default")
 	assert.Nil(t, err)
-	assert.Equal(t, *argGCRSecretName, serviceAccount.ImagePullSecrets[0].Name)
-
-	serviceAccount, err = c.kubeClient.ServiceAccounts("namespace1").Get("default")
-	assert.Nil(t, err)
-	assert.Equal(t, *argGCRSecretName, serviceAccount.ImagePullSecrets[0].Name)
-
-	// Test AWS
-	secret, err = c.kubeClient.Secrets("namespace2").Get(*argAWSSecretName)
-	assert.Nil(t, err)
-	assert.Equal(t, *argAWSSecretName, secret.Name)
-	assert.Equal(t, map[string][]byte{
-		".dockerconfigjson": []byte(fmt.Sprintf(dockerJSONTemplate, "fakeEndpoint", "fakeToken")),
-	}, secret.Data)
-	assert.Equal(t, api.SecretType("kubernetes.io/dockerconfigjson"), secret.Type)
-
-	secret, err = c.kubeClient.Secrets("namespace2").Get(*argAWSSecretName)
-	assert.Nil(t, err)
-	assert.Equal(t, *argAWSSecretName, secret.Name)
-	assert.Equal(t, map[string][]byte{
-		".dockerconfigjson": []byte(fmt.Sprintf(dockerJSONTemplate, "fakeEndpoint", "fakeToken")),
-	}, secret.Data)
-	assert.Equal(t, api.SecretType("kubernetes.io/dockerconfigjson"), secret.Type)
-
-	_, err = c.kubeClient.Secrets("kube-system").Get(*argAWSSecretName)
-	assert.NotNil(t, err)
+	assert.Equal(t, 1, len(serviceAccount.ImagePullSecrets))
+	assert.Equal(t, *argDefaultSecretName, serviceAccount.ImagePullSecrets[0].Name)
 
 	serviceAccount, err = c.kubeClient.ServiceAccounts("namespace2").Get("default")
 	assert.Nil(t, err)
-	assert.Equal(t, 2, len(serviceAccount.ImagePullSecrets))
-	assert.Equal(t, *argAWSSecretName, serviceAccount.ImagePullSecrets[1].Name)
-
-	serviceAccount, err = c.kubeClient.ServiceAccounts("namespace2").Get("default")
-	assert.Nil(t, err)
-	assert.Equal(t, 2, len(serviceAccount.ImagePullSecrets))
-	assert.Equal(t, *argAWSSecretName, serviceAccount.ImagePullSecrets[1].Name)
+	assert.Equal(t, 1, len(serviceAccount.ImagePullSecrets))
+	assert.Equal(t, *argDefaultSecretName, serviceAccount.ImagePullSecrets[0].Name)
 }
 
 func TestProcessWithExistingSecrets(t *testing.T) {
 	kubeClient := newFakeKubeClient()
 	ecrClient := newFakeEcrClient()
-	*argGCRURL = "fakeEndpoint"
-	gcrClient := newFakeGcrClient()
-	c := &controller{kubeClient, ecrClient, gcrClient}
 
-	secretGCR := &api.Secret{
+	c := &controller{kubeClient, ecrClient}
+
+	secret := &api.Secret{
 		ObjectMeta: api.ObjectMeta{
-			Name: *argGCRSecretName,
-		},
-		Data: map[string][]byte{
-			".dockercfg": []byte("some other config"),
-		},
-		Type: "some other type",
-	}
-
-	_, err := c.kubeClient.Secrets("namespace1").Create(secretGCR)
-	assert.Nil(t, err)
-	_, err = c.kubeClient.Secrets("namespace2").Create(secretGCR)
-	assert.Nil(t, err)
-
-	secretAWS := &api.Secret{
-		ObjectMeta: api.ObjectMeta{
-			Name: *argAWSSecretName,
+			Name: *argDefaultSecretName,
 		},
 		Data: map[string][]byte{
 			".dockerconfigjson": []byte("some other config"),
@@ -426,86 +324,36 @@ func TestProcessWithExistingSecrets(t *testing.T) {
 		Type: "some other type",
 	}
 
-	_, err = c.kubeClient.Secrets("namespace1").Create(secretAWS)
+	_, err := c.kubeClient.Secrets("namespace1").Create(secret)
 	assert.Nil(t, err)
-	_, err = c.kubeClient.Secrets("namespace2").Create(secretAWS)
+	_, err = c.kubeClient.Secrets("namespace2").Create(secret)
 	assert.Nil(t, err)
 
 	err = c.process()
 	assert.Nil(t, err)
 
-	// Test GCR
-	secretGCR, err = c.kubeClient.Secrets("namespace1").Get(*argGCRSecretName)
+	secret, err = c.kubeClient.Secrets("namespace1").Get(*argDefaultSecretName)
 	assert.Nil(t, err)
-	assert.Equal(t, *argGCRSecretName, secretGCR.Name)
-	assert.Equal(t, map[string][]byte{
-		".dockercfg": []byte(fmt.Sprintf(dockerCfgTemplate, "fakeEndpoint", "fakeToken")),
-	}, secretGCR.Data)
-	assert.Equal(t, secretGCR.Type, api.SecretType("kubernetes.io/dockercfg"))
-
-	secretGCR, err = c.kubeClient.Secrets("namespace2").Get(*argGCRSecretName)
-	assert.Nil(t, err)
-	assert.Equal(t, *argGCRSecretName, secretGCR.Name)
-	assert.Equal(t, map[string][]byte{
-		".dockercfg": []byte(fmt.Sprintf(dockerCfgTemplate, "fakeEndpoint", "fakeToken")),
-	}, secretGCR.Data)
-	assert.Equal(t, api.SecretType("kubernetes.io/dockercfg"), secretGCR.Type)
-
-	secretGCR, err = c.kubeClient.Secrets("namespace1").Get(*argGCRSecretName)
-	assert.Nil(t, err)
-	assert.Equal(t, *argGCRSecretName, secretGCR.Name)
-	assert.Equal(t, map[string][]byte{
-		".dockercfg": []byte(fmt.Sprintf(dockerCfgTemplate, "fakeEndpoint", "fakeToken")),
-	}, secretGCR.Data)
-	assert.Equal(t, secretGCR.Type, api.SecretType("kubernetes.io/dockercfg"))
-
-	secretGCR, err = c.kubeClient.Secrets("namespace2").Get(*argGCRSecretName)
-	assert.Nil(t, err)
-	assert.Equal(t, *argGCRSecretName, secretGCR.Name)
-	assert.Equal(t, map[string][]byte{
-		".dockercfg": []byte(fmt.Sprintf(dockerCfgTemplate, "fakeEndpoint", "fakeToken")),
-	}, secretGCR.Data)
-	assert.Equal(t, api.SecretType("kubernetes.io/dockercfg"), secretGCR.Type)
-
-	// Test AWS
-	secretAWS, err = c.kubeClient.Secrets("namespace1").Get(*argAWSSecretName)
-	assert.Nil(t, err)
-	assert.Equal(t, *argAWSSecretName, secretAWS.Name)
+	assert.Equal(t, *argDefaultSecretName, secret.Name)
 	assert.Equal(t, map[string][]byte{
 		".dockerconfigjson": []byte(fmt.Sprintf(dockerJSONTemplate, "fakeEndpoint", "fakeToken")),
-	}, secretAWS.Data)
-	assert.Equal(t, secretAWS.Type, api.SecretType("kubernetes.io/dockerconfigjson"))
+	}, secret.Data)
+	assert.Equal(t, secret.Type, api.SecretType("kubernetes.io/dockerconfigjson"))
 
-	secretAWS, err = c.kubeClient.Secrets("namespace2").Get(*argAWSSecretName)
+	secret, err = c.kubeClient.Secrets("namespace2").Get(*argDefaultSecretName)
 	assert.Nil(t, err)
-	assert.Equal(t, *argAWSSecretName, secretAWS.Name)
+	assert.Equal(t, *argDefaultSecretName, secret.Name)
 	assert.Equal(t, map[string][]byte{
 		".dockerconfigjson": []byte(fmt.Sprintf(dockerJSONTemplate, "fakeEndpoint", "fakeToken")),
-	}, secretAWS.Data)
-	assert.Equal(t, api.SecretType("kubernetes.io/dockerconfigjson"), secretAWS.Type)
-
-	secretAWS, err = c.kubeClient.Secrets("namespace1").Get(*argAWSSecretName)
-	assert.Nil(t, err)
-	assert.Equal(t, *argAWSSecretName, secretAWS.Name)
-	assert.Equal(t, map[string][]byte{
-		".dockerconfigjson": []byte(fmt.Sprintf(dockerJSONTemplate, "fakeEndpoint", "fakeToken")),
-	}, secretAWS.Data)
-	assert.Equal(t, secretAWS.Type, api.SecretType("kubernetes.io/dockerconfigjson"))
-
-	secretAWS, err = c.kubeClient.Secrets("namespace2").Get(*argAWSSecretName)
-	assert.Nil(t, err)
-	assert.Equal(t, *argAWSSecretName, secretAWS.Name)
-	assert.Equal(t, map[string][]byte{
-		".dockerconfigjson": []byte(fmt.Sprintf(dockerJSONTemplate, "fakeEndpoint", "fakeToken")),
-	}, secretAWS.Data)
-	assert.Equal(t, api.SecretType("kubernetes.io/dockerconfigjson"), secretAWS.Type)
+	}, secret.Data)
+	assert.Equal(t, api.SecretType("kubernetes.io/dockerconfigjson"), secret.Type)
 }
 
 func TestProcessNoDefaultServiceAccount(t *testing.T) {
 	kubeClient := newFakeKubeClient()
 	ecrClient := newFakeEcrClient()
-	gcrClient := newFakeGcrClient()
-	c := &controller{kubeClient, ecrClient, gcrClient}
+
+	c := &controller{kubeClient, ecrClient}
 
 	err := c.kubeClient.ServiceAccounts("namespace1").Delete("default")
 	assert.Nil(t, err)
@@ -519,8 +367,8 @@ func TestProcessNoDefaultServiceAccount(t *testing.T) {
 func TestProcessWithExistingImagePullSecrets(t *testing.T) {
 	kubeClient := newFakeKubeClient()
 	ecrClient := newFakeEcrClient()
-	gcrClient := newFakeGcrClient()
-	c := &controller{kubeClient, ecrClient, gcrClient}
+
+	c := &controller{kubeClient, ecrClient}
 
 	serviceAccount, err := c.kubeClient.ServiceAccounts("namespace1").Get("default")
 	assert.Nil(t, err)
@@ -536,17 +384,15 @@ func TestProcessWithExistingImagePullSecrets(t *testing.T) {
 
 	serviceAccount, err = c.kubeClient.ServiceAccounts("namespace1").Get("default")
 	assert.Nil(t, err)
-	assert.Equal(t, 3, len(serviceAccount.ImagePullSecrets))
+	assert.Equal(t, 2, len(serviceAccount.ImagePullSecrets))
 	assert.Equal(t, "someOtherSecret", serviceAccount.ImagePullSecrets[0].Name)
-	assert.Equal(t, *argGCRSecretName, serviceAccount.ImagePullSecrets[1].Name)
-	assert.Equal(t, *argAWSSecretName, serviceAccount.ImagePullSecrets[2].Name)
+	assert.Equal(t, *argDefaultSecretName, serviceAccount.ImagePullSecrets[1].Name)
 
 	serviceAccount, err = c.kubeClient.ServiceAccounts("namespace2").Get("default")
 	assert.Nil(t, err)
-	assert.Equal(t, 3, len(serviceAccount.ImagePullSecrets))
+	assert.Equal(t, 2, len(serviceAccount.ImagePullSecrets))
 	assert.Equal(t, "someOtherSecret", serviceAccount.ImagePullSecrets[0].Name)
-	assert.Equal(t, *argGCRSecretName, serviceAccount.ImagePullSecrets[1].Name)
-	assert.Equal(t, *argAWSSecretName, serviceAccount.ImagePullSecrets[2].Name)
+	assert.Equal(t, *argDefaultSecretName, serviceAccount.ImagePullSecrets[1].Name)
 }
 
 func TestDefaultAwsRegionFromArgs(t *testing.T) {
